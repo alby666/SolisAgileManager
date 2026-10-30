@@ -766,23 +766,33 @@ private enum MeterType
     
     public async Task<string?> GetCurrentOctopusTariffCode(string apiKey, string accountNumber)
     {
-        var importMeter = await GetMeter(apiKey, accountNumber, MeterType.Import);
+        return await GetCurrentOctopusTariffCode(apiKey, accountNumber, MeterType.Import);
+    }
+
+    public async Task<string?> GetCurrentOctopusExportTariffCode(string apiKey, string accountNumber)
+    {
+        return await GetCurrentOctopusTariffCode(apiKey, accountNumber, MeterType.Export);
+    }
+
+    private async Task<string?> GetCurrentOctopusTariffCode(string apiKey, string accountNumber, MeterType meterType)
+    {
+        var meter = await GetMeter(apiKey, accountNumber, meterType);
         var now = DateTime.UtcNow;
 
-        if (importMeter != null)
+        if (meter != null)
         {
             // Look for a contract with no end date.
-            var contract = importMeter.agreements.FirstOrDefault(x => x.valid_from < now && x.valid_to == null);
+            var contract = meter.agreements.FirstOrDefault(x => x.valid_from < now && x.valid_to == null);
 
             // It's possible it has an end-date set, that's later than today. 
             if (contract == null)
-                contract = importMeter.agreements.FirstOrDefault(x =>
+                contract = meter.agreements.FirstOrDefault(x =>
                     x.valid_from < now && x.valid_to != null && x.valid_to > now);
 
             if (contract != null)
             {
-                logger.LogInformation("Found Octopus Product/Contract: {P}, Starts {S:dd-MMM-yyyy}",
-                    contract.tariff_code, contract.valid_from);
+                logger.LogInformation("Found Octopus {MeterType} Product/Contract: {P}, Starts {S:dd-MMM-yyyy}",
+                    meterType, contract.tariff_code, contract.valid_from);
                 return contract.tariff_code;
             }
         }

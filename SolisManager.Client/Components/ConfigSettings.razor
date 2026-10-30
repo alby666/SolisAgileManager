@@ -70,6 +70,21 @@
                     <OctopusProductSelector @bind-TariffCode="config.OverrideProductCode" Disabled="@(!overrideProduct)" RegionClearable/>
                 </div>
             }
+            <h5>Export Tariff</h5>
+            <ConfigSettingHelp HelpText="When an Octopus account and API key are configured, the export tariff is detected from its export meter. Enter a tariff code here only if you need to override discovery. Export rates are also displayed on the Charging Strategy Graph.">
+                <MudTextField T="string" Label="Export Tariff Code (optional override)"
+                              @bind-Value="@config.OctopusExportTariffCode" Immediate="true"
+                              @attributes="UIConstants.TextAttribs"/>
+            </ConfigSettingHelp>
+            <ConfigSettingHelp HelpText="When enabled, the planner may schedule one profitable overnight charge, export discharge, and final charge cycle. It will only do so when the battery can finish full before the overnight period ends.">
+                <MudCheckBox Label="Use export tariff arbitrage" LabelPlacement="Placement.End"
+                             @bind-Value="@config.UseExportTariffArbitrage"/>
+            </ConfigSettingHelp>
+            <ConfigSettingHelp HelpText="Assumed round-trip battery efficiency used when checking whether export revenue exceeds the cost of replacing exported energy.">
+                <MudNumericField T="int" Label="Battery Round-trip Efficiency (%)"
+                                 @bind-Value="@config.ExportBatteryEfficiencyPercent" Min="1" Max="100"
+                                 @attributes="UIConstants.TextAttribs"/>
+            </ConfigSettingHelp>
         </div>
         @if (config.TariffIsIntelligentGo)
         {

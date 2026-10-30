@@ -297,11 +297,18 @@ public class InverterManager : IInverterManagerService, IInverterRefreshService
     
                 var rates = await octopusAPI.GetOctopusRates(config.ProductCode, start, 
                     start.AddDays(3), CancellationToken.None);
+                var exportRates = await GetExportRates(start, start.AddDays(3));
+                var exportRateLookup = exportRates
+                    .DistinctBy(x => x.valid_from)
+                    .ToDictionary(x => x.valid_from, x => x.value_inc_vat);
 
                 slots = rates.Where(x => x.valid_from >= start )
                              .Select(x => new PricePlanSlot
                             {
                                 value_inc_vat = x.value_inc_vat,
+                                export_value_inc_vat = exportRateLookup.TryGetValue(x.valid_from, out var exportRate)
+                                    ? exportRate
+                                    : null,
                                 valid_from = x.valid_from,
                                 valid_to = x.valid_to ?? DateTime.MaxValue
                             }).ToList();
@@ -327,6 +334,31 @@ public class InverterManager : IInverterManagerService, IInverterRefreshService
         catch (Exception ex)
         {
             logger.LogError(ex, "Unexexpected error recalculating slot plan");
+        }
+    }
+
+    private async Task<IEnumerable<OctopusRate>> GetExportRates(DateTime start, DateTime end)
+    {
+        try
+        {
+            var tariffCode = config.OctopusExportTariffCode?.Trim();
+            if (string.IsNullOrWhiteSpace(tariffCode) &&
+                !string.IsNullOrWhiteSpace(config.OctopusAPIKey) &&
+                !string.IsNullOrWhiteSpace(config.OctopusAccountNumber))
+            {
+                tariffCode = await octopusAPI.GetCurrentOctopusExportTariffCode(
+                    config.OctopusAPIKey, config.OctopusAccountNumber);
+            }
+
+            if (string.IsNullOrWhiteSpace(tariffCode))
+                return [];
+
+            return await octopusAPI.GetOctopusRates(tariffCode, start, end, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Unable to retrieve or discover Octopus export tariff rates");
+            return [];
         }
     }
 
@@ -420,13 +452,14 @@ public class InverterManager : IInverterManagerService, IInverterRefreshService
             var rnd = new Random();
             var firstSlot = slots.FirstOrDefault();
 
-            if (firstSlot != null)
+            if (firstSlot != null && config.SlotsForFullBatteryCharge > 0)
             {
+                var chargeStep = 100.0M / config.SlotsForFullBatteryCharge;
                 InverterState.BatterySOC = firstSlot.PlanAction switch
                 {
-                    SlotAction.Charge => Math.Min(InverterState.BatterySOC += 100 / config.SlotsForFullBatteryCharge, 100),
+                    SlotAction.Charge => Math.Min(InverterState.BatterySOC += chargeStep, 100),
                     SlotAction.DoNothing => Math.Max(InverterState.BatterySOC -= rnd.Next(4, 7), 20),
-                    SlotAction.Discharge => Math.Max(InverterState.BatterySOC -= 100 / config.SlotsForFullBatteryCharge, 20),
+                    SlotAction.Discharge => Math.Max(InverterState.BatterySOC -= chargeStep, 20),
                     _ => InverterState.BatterySOC
                 };
             }
@@ -711,8 +744,9 @@ public class InverterManager : IInverterManagerService, IInverterRefreshService
             EvaluatePriceBasedRules(slots);
             EvaluateCheapChargeSlots(slots);
             EvaluateScheduleActionRules(slots);
-            EvaluateNOCRule(slots);
+            var skipOvernightCharge = EvaluateNOCRule(slots);
             EvaluateDumpAndRechargeIfFreeRule(slots);
+            EvaluateExportTariffArbitrage(slots, skipOvernightCharge);
         }
         catch (Exception ex)
         {
@@ -781,6 +815,93 @@ public class InverterManager : IInverterManagerService, IInverterRefreshService
             }
         }
     }
+
+    private void EvaluateExportTariffArbitrage(PricePlanSlot[] slots, bool skipOvernightCharge)
+    {
+        if (!config.UseExportTariffArbitrage || config.DisableAutoDischarge || skipOvernightCharge ||
+            config.SlotsForFullBatteryCharge <= 0)
+            return;
+
+        if (config.ExportBatteryEfficiencyPercent is < 1 or > 100)
+        {
+            logger.LogWarning("Ignoring export tariff arbitrage because battery efficiency must be between 1 and 100 percent");
+            return;
+        }
+
+        var now = DateTime.Now;
+        var night = slots
+            .Where(x => !x.Daytime && x.valid_from >= now)
+            .GroupBy(x => x.valid_from.TimeOfDay >= TimeSpan.FromHours(12)
+                ? x.valid_from.Date
+                : x.valid_from.Date.AddDays(-1))
+            .OrderBy(x => x.Min(slot => slot.valid_from))
+            .FirstOrDefault();
+
+        if (night == null)
+            return;
+
+        var nightSlots = night.OrderBy(x => x.valid_from).ToArray();
+        if (nightSlots.Length < 3 || nightSlots.Any(x => x.PlanAction == SlotAction.Discharge))
+            return;
+
+        var finalChargeSlot = nightSlots[^1];
+        if (HasSlotOverride(finalChargeSlot))
+            return;
+
+        var chargeableSlots = nightSlots
+            .Where(x => !HasSlotOverride(x) && x.PlanAction != SlotAction.Discharge)
+            .ToArray();
+        var requiredPrechargeSlots = config.SlotsForFullBatteryCharge;
+        var efficiency = config.ExportBatteryEfficiencyPercent / 100.0M;
+        var baselineChargeCost = chargeableSlots
+            .OrderBy(x => x.value_inc_vat)
+            .Take(requiredPrechargeSlots)
+            .Sum(x => x.value_inc_vat);
+
+        var candidate = nightSlots[^2];
+        if (candidate.export_value_inc_vat == null ||
+            candidate.value_inc_vat <= 0 ||
+            candidate.PriceType == PriceType.Negative ||
+            HasSlotOverride(candidate))
+            return;
+
+        var prechargeStart = nightSlots.Length - requiredPrechargeSlots - 2;
+        if (prechargeStart < 0)
+            return;
+
+        var prechargeSlots = nightSlots[prechargeStart..^2];
+        if (prechargeSlots.Length != requiredPrechargeSlots ||
+            prechargeSlots.Any(x => HasSlotOverride(x) || x.PlanAction == SlotAction.Discharge))
+            return;
+
+        var cycleSlots = prechargeSlots.Append(candidate).Append(finalChargeSlot).ToArray();
+        if (cycleSlots.Zip(cycleSlots.Skip(1), (current, next) => current.valid_to == next.valid_from).Any(adjacent => !adjacent))
+            return;
+
+        var cycleChargeCost = prechargeSlots.Sum(x => x.value_inc_vat) + finalChargeSlot.value_inc_vat;
+        var incrementalChargeCost = cycleChargeCost - baselineChargeCost;
+        var exportPrice = candidate.export_value_inc_vat.Value;
+        if (exportPrice * efficiency <= incrementalChargeCost)
+            return;
+
+        var reason = $"Export at {exportPrice:F2}p/kWh is profitable after {config.ExportBatteryEfficiencyPercent}% battery efficiency";
+        foreach (var slot in prechargeSlots)
+        {
+            slot.PlanAction = SlotAction.Charge;
+            slot.ActionReason = "Charging before profitable export; the battery will be restored by the end of the overnight period";
+        }
+
+        candidate.PlanAction = SlotAction.Discharge;
+        candidate.ActionReason = reason;
+        finalChargeSlot.PlanAction = SlotAction.Charge;
+        finalChargeSlot.ActionReason = "Final overnight charge to start the day with a full battery";
+    }
+
+    private static bool HasSlotOverride(PricePlanSlot slot) =>
+            slot.ManualOverride != null ||
+            slot.ScheduledOverride != null ||
+            slot.AutoOverride != null ||
+            slot.VPPOverride != null;
     
     private void EvaluateScheduleActionRules(PricePlanSlot[] slots)
     {
@@ -862,10 +983,10 @@ public class InverterManager : IInverterManagerService, IInverterRefreshService
     /// threshold.
     /// </summary>
     /// <param name="slots"></param>
-    private void EvaluateNOCRule(PricePlanSlot[] slots)
+    private bool EvaluateNOCRule(PricePlanSlot[] slots)
     {
         if (!config.SkipOvernightCharge)
-            return;
+            return false;
 
         // Force evaluate the forecast to ensure we have latest for today/tomorrow
         // Otherwise we might have a race condition
@@ -916,12 +1037,15 @@ public class InverterManager : IInverterManagerService, IInverterRefreshService
                     slot.PlanAction = SlotAction.DoNothing;
                     slot.ActionReason = $"Skipping overnight charge due to {forecastName} of {dampedForecast:F2}kWh";
                 }
+                return true;
         }
         else
         {
             logger.LogInformation("{FN} = {F:F2}kWh (so below {T}kWh). NOC rule will not trigger, battery will be charged overnight",
                                 forecastName, dampedForecast, config.ForecastThreshold);
         }
+
+        return false;
     }
 
 

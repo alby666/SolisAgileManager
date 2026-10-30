@@ -35,6 +35,7 @@ public record OctopusRate
 public record PricePlanSlot
 {
     public decimal value_inc_vat { get; set;  }
+    public decimal? export_value_inc_vat { get; set; }
     public DateTime valid_from { get; set;  }
     public DateTime valid_to { get; set;  } = DateTime.UtcNow;
     public bool Daytime { get; set; } = true;
@@ -117,4 +118,3 @@ public record PricePlanSlot
         return $"{valid_from:dd-MMM-yyyy HH:mm}-{valid_to:HH:mm}: {act.type}={act.action.Humanize()} (price: {value_inc_vat}p/kWh, Reason: {ActionReason})";
     }
 }
-

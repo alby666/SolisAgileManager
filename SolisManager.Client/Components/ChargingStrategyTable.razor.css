@@ -42,6 +42,15 @@
     align-items: center;
 }
 
+.export-price {
+    color: #16803c;
+    font-size: 0.85em;
+}
+
+.table-dark .export-price {
+    color: #73d39b;
+}
+
 @media screen and (max-width: 900px) {
     .table-chart {
         padding-right: 2px;
@@ -85,4 +94,3 @@
     padding-left: 5px;
     padding-right: 5px;
 }
-

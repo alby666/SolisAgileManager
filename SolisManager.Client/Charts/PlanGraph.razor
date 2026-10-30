@@ -24,6 +24,16 @@
 
                 <ApexPointSeries TItem="PricePlanSlot"
                                  Items="ChartData"
+                                 Name="Export Price (p/kWh)"
+                                 XValue="@(e => e.valid_from)"
+                                 YValue="@(e => e.export_value_inc_vat)"
+                                 SeriesType="SeriesType.Line"
+                                 Color="darkgreen"
+                                 Hidden="@(!ChartData.Any(x => x.export_value_inc_vat != null))"
+                                 Stroke="@(new SeriesStroke { Color = "darkgreen", Width = 3 })"/>
+
+                <ApexPointSeries TItem="PricePlanSlot"
+                                 Items="ChartData"
                                  Name="PV Forecast (kWh)"
                                  XValue="@(e => e.valid_from)"
                                  YValue="@(e => e.pv_est_kwh)"

@@ -15,6 +15,9 @@ public record SolisManagerConfig
     public string OctopusAPIKey { get; set; } = string.Empty;
     // The product code from the account
     public string OctopusProductCode { get; set; } = String.Empty;
+    public string? OctopusExportTariffCode { get; set; }
+    public bool UseExportTariffArbitrage { get; set; } = true;
+    public int ExportBatteryEfficiencyPercent { get; set; } = 90;
     
     // Manually overridden product code
     public string? OverrideProductCode { get; set; } = string.Empty;

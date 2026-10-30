@@ -171,6 +171,20 @@ the last `A` to the correct [Region Code](https://mysmartenergy.uk/Electricity-R
 need. Solis Manager doesn't do anything with the standing charge, so it doesn't matter if you're on an older
 tariff. 
 
+#### Export Tariff and Overnight Arbitrage
+
+When an Octopus account and API key are configured, Solis Manager detects the active export tariff from the
+account's export meter and adds its rates to the Charging Strategy Graph and slot table. If the export meter
+is on a separate account, include that account number in the comma-separated account list. You can enter an
+export tariff code in the optional override field if automatic discovery is unavailable.
+
+Overnight export arbitrage is enabled by default when export rates are available. The planner uses the
+configured round-trip battery efficiency (90% by default) to determine whether an export is worth more than
+the additional cost of replacing the exported energy. It schedules a charge before the discharge and a final
+charge in the last slot of the overnight period only when the battery can be brought to full charge by then.
+Manual, scheduled, automatic, and VPP slot overrides are preserved. Disable **Use export tariff arbitrage**
+to display export prices without scheduling these cycles.
+
 ### Axle.Energy VPP Integration
 
 [Axle.Energy](https://vpp.axle.energy/landing?ref=R-LKLMKHRL) is a Virtual Power Plant (VPP) provider, who 
