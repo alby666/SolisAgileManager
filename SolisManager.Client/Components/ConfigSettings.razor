@@ -76,7 +76,7 @@
                               @bind-Value="@config.OctopusExportTariffCode" Immediate="true"
                               @attributes="UIConstants.TextAttribs"/>
             </ConfigSettingHelp>
-            <ConfigSettingHelp HelpText="When enabled, the planner may schedule one profitable overnight charge, export discharge, and final charge cycle. It will only do so when the battery can finish full before the overnight period ends.">
+            <ConfigSettingHelp HelpText="When enabled, the planner may schedule one profitable overnight charge, export discharge, and final charge cycle. The complete cycle must fit within a contiguous cheap import period so the battery is restored before that period ends.">
                 <MudCheckBox Label="Use export tariff arbitrage" LabelPlacement="Placement.End"
                              @bind-Value="@config.UseExportTariffArbitrage"/>
             </ConfigSettingHelp>

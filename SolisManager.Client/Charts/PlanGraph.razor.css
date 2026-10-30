@@ -18,3 +18,54 @@
     align-items: center;
     margin: 10px;
 }
+
+.chart-area ::deep .apexcharts-legend {
+    flex-wrap: nowrap !important;
+    justify-content: center !important;
+    width: 100%;
+}
+
+.chart-area ::deep .apexcharts-legend-series {
+    margin: 4px 8px !important;
+}
+
+.chart-tooltip {
+    display: flex;
+    flex-direction: column;
+    row-gap: 4px;
+    min-width: 180px;
+    padding: 8px;
+}
+
+.chart-tooltip-title {
+    font-weight: 600;
+    padding-bottom: 4px;
+    margin-bottom: 2px;
+    border-bottom: 1px solid darkgray;
+}
+
+.price-row {
+    display: flex;
+    justify-content: space-between;
+    column-gap: 16px;
+}
+
+.tooltip-marker {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    margin-right: 6px;
+    border-radius: 50%;
+}
+
+.import-marker {
+    background: #005ba3;
+}
+
+.export-marker {
+    background: #8e44ad;
+}
+
+.forecast-marker {
+    background: darkorange;
+}

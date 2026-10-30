@@ -7,6 +7,7 @@ using SolisManager.Extensions;
 using SolisManager.Inverters.Solis;
 using SolisManager.Shared;
 using SolisManager.Shared.Extensions;
+using SolisManager.Shared.InverterConfigs;
 using SolisManager.Shared.Interfaces;
 using SolisManager.Shared.Models;
 
@@ -844,57 +845,105 @@ public class InverterManager : IInverterManagerService, IInverterRefreshService
         if (nightSlots.Length < 3 || nightSlots.Any(x => x.PlanAction == SlotAction.Discharge))
             return;
 
-        var finalChargeSlot = nightSlots[^1];
-        if (HasSlotOverride(finalChargeSlot))
-            return;
-
         var chargeableSlots = nightSlots
             .Where(x => !HasSlotOverride(x) && x.PlanAction != SlotAction.Discharge)
             .ToArray();
         var requiredPrechargeSlots = config.SlotsForFullBatteryCharge;
+        if (chargeableSlots.Length < requiredPrechargeSlots)
+            return;
+
         var efficiency = config.ExportBatteryEfficiencyPercent / 100.0M;
         var baselineChargeCost = chargeableSlots
             .OrderBy(x => x.value_inc_vat)
             .Take(requiredPrechargeSlots)
             .Sum(x => x.value_inc_vat);
 
-        var candidate = nightSlots[^2];
-        if (candidate.export_value_inc_vat == null ||
-            candidate.value_inc_vat <= 0 ||
-            candidate.PriceType == PriceType.Negative ||
-            HasSlotOverride(candidate))
-            return;
-
-        var prechargeStart = nightSlots.Length - requiredPrechargeSlots - 2;
-        if (prechargeStart < 0)
-            return;
-
-        var prechargeSlots = nightSlots[prechargeStart..^2];
-        if (prechargeSlots.Length != requiredPrechargeSlots ||
-            prechargeSlots.Any(x => HasSlotOverride(x) || x.PlanAction == SlotAction.Discharge))
-            return;
-
-        var cycleSlots = prechargeSlots.Append(candidate).Append(finalChargeSlot).ToArray();
-        if (cycleSlots.Zip(cycleSlots.Skip(1), (current, next) => current.valid_to == next.valid_from).Any(adjacent => !adjacent))
-            return;
-
-        var cycleChargeCost = prechargeSlots.Sum(x => x.value_inc_vat) + finalChargeSlot.value_inc_vat;
-        var incrementalChargeCost = cycleChargeCost - baselineChargeCost;
-        var exportPrice = candidate.export_value_inc_vat.Value;
-        if (exportPrice * efficiency <= incrementalChargeCost)
-            return;
-
-        var reason = $"Export at {exportPrice:F2}p/kWh is profitable after {config.ExportBatteryEfficiencyPercent}% battery efficiency";
-        foreach (var slot in prechargeSlots)
+        PricePlanSlot[]? bestPrechargeSlots = null;
+        PricePlanSlot[]? bestDischargeSlots = null;
+        PricePlanSlot[]? bestFinalChargeSlots = null;
+        decimal bestProfit = 0;
+        var minimumDischargeSoc = (config.InverterConfig as InverterConfigSolis)?.MinDischargeSOC ?? 15;
+        var chargeAmps = (config.InverterConfig as InverterConfigSolis)?.MaxChargeRateAmps ?? 1;
+        var dischargeAmps = (config.InverterConfig as InverterConfigSolis)?.MaxDischargeRateAmps ?? chargeAmps;
+        if (minimumDischargeSoc is < 0 or >= 100 || chargeAmps <= 0 || dischargeAmps <= 0)
         {
-            slot.PlanAction = SlotAction.Charge;
-            slot.ActionReason = "Charging before profitable export; the battery will be restored by the end of the overnight period";
+            logger.LogWarning("Ignoring export tariff arbitrage because inverter charge/discharge settings are invalid");
+            return;
         }
 
-        candidate.PlanAction = SlotAction.Discharge;
-        candidate.ActionReason = reason;
-        finalChargeSlot.PlanAction = SlotAction.Charge;
-        finalChargeSlot.ActionReason = "Final overnight charge to start the day with a full battery";
+        var dischargeEnergyPerSlot = dischargeAmps / (decimal)chargeAmps;
+        var maxDischargeSlots = (int)Math.Floor(
+            requiredPrechargeSlots * (100 - minimumDischargeSoc) / 100.0M / dischargeEnergyPerSlot);
+
+        // The cheap import period can end before sunrise. Restrict the cycle to a
+        // contiguous run of cheap import slots so the final recharge stays cheap.
+        foreach (var cheapWindow in nightSlots
+                     .GetAdjacentGroups(x => x.PriceType is PriceType.Cheapest or PriceType.BelowThreshold)
+                     .Select(x => x.ToArray()))
+        {
+            for (var dischargeSlotCount = 1; dischargeSlotCount <= maxDischargeSlots; dischargeSlotCount++)
+            {
+                var requiredRestoreSlots = (int)Math.Ceiling(dischargeSlotCount * dischargeEnergyPerSlot);
+                var cycleLength = requiredPrechargeSlots + dischargeSlotCount + requiredRestoreSlots;
+                if (cheapWindow.Length < cycleLength)
+                    continue;
+
+                for (var cycleStart = 0; cycleStart <= cheapWindow.Length - cycleLength; cycleStart++)
+                {
+                    var prechargeSlots = cheapWindow[cycleStart..(cycleStart + requiredPrechargeSlots)];
+                    var dischargeStart = cycleStart + requiredPrechargeSlots;
+                    var dischargeSlots = cheapWindow[dischargeStart..(dischargeStart + dischargeSlotCount)];
+                    var restoreStart = dischargeStart + dischargeSlotCount;
+                    var finalChargeSlots = cheapWindow[restoreStart..(restoreStart + requiredRestoreSlots)];
+                    var cycleSlots = prechargeSlots.Concat(dischargeSlots).Concat(finalChargeSlots).ToArray();
+
+                    if (dischargeSlots.Any(x => x.export_value_inc_vat == null || x.value_inc_vat <= 0) ||
+                        cycleSlots.Any(HasSlotOverride) ||
+                        cycleSlots.Zip(cycleSlots.Skip(1), (current, next) => current.valid_to == next.valid_from)
+                            .Any(adjacent => !adjacent))
+                        continue;
+
+                    var cycleChargeCost = prechargeSlots.Sum(x => x.value_inc_vat) +
+                                          finalChargeSlots.Sum(x => x.value_inc_vat);
+                    var incrementalChargeCost = cycleChargeCost - baselineChargeCost;
+                    var exportRevenue = dischargeSlots.Sum(x => x.export_value_inc_vat!.Value) *
+                                        efficiency * dischargeEnergyPerSlot;
+                    var profit = exportRevenue - incrementalChargeCost;
+
+                    if (profit > bestProfit)
+                    {
+                        bestProfit = profit;
+                        bestPrechargeSlots = prechargeSlots;
+                        bestDischargeSlots = dischargeSlots;
+                        bestFinalChargeSlots = finalChargeSlots;
+                    }
+                }
+            }
+        }
+
+        if (bestPrechargeSlots == null || bestDischargeSlots == null || bestFinalChargeSlots == null)
+            return;
+
+        foreach (var slot in bestPrechargeSlots)
+        {
+            slot.PlanAction = SlotAction.Charge;
+            slot.ActionReason = "Charging before profitable export; the battery will be restored by the end of the cheap overnight period";
+        }
+
+        foreach (var slot in bestDischargeSlots)
+        {
+            slot.PlanAction = SlotAction.Discharge;
+            slot.ActionReason = $"Export at {slot.export_value_inc_vat:F2}p/kWh is profitable after {config.ExportBatteryEfficiencyPercent}% battery efficiency";
+        }
+
+        foreach (var slot in bestFinalChargeSlots)
+        {
+            slot.PlanAction = SlotAction.Charge;
+            slot.ActionReason = "Final overnight charge to start the day with a full battery";
+        }
+
+        logger.LogInformation("Scheduling overnight export tariff arbitrage from {Start:g} to {End:g}",
+            bestPrechargeSlots[0].valid_from, bestFinalChargeSlots[^1].valid_to);
     }
 
     private static bool HasSlotOverride(PricePlanSlot slot) =>

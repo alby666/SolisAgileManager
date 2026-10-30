@@ -12,9 +12,40 @@
                        Options="@Options"
                        Height="@("100%")">
 
+                <ApexPointTooltip>
+                    @{
+                        var slot = context.DataPoint.Items.FirstOrDefault();
+                    }
+                    @if (slot != null)
+                    {
+                        <div class="chart-tooltip">
+                            <div class="chart-tooltip-title">@slot.valid_from.ToString("dd-MMM HH:mm")</div>
+                            <div class="price-row">
+                                <span><span class="tooltip-marker import-marker"></span>Import</span>
+                                <span>@slot.value_inc_vat.ToString("F2")p/kWh</span>
+                            </div>
+                            @if (slot.export_value_inc_vat is decimal exportPrice)
+                            {
+                                <div class="price-row">
+                                    <span><span class="tooltip-marker export-marker"></span>Export</span>
+                                    <span>@exportPrice.ToString("F2")p/kWh</span>
+                                </div>
+                            }
+                            @if (slot.pv_est_kwh is decimal forecast)
+                            {
+                                <div class="price-row">
+                                    <span><span class="tooltip-marker forecast-marker"></span>PV Forecast</span>
+                                    <span>@forecast.ToString("F1")kWh</span>
+                                </div>
+                            }
+                        </div>
+                    }
+                </ApexPointTooltip>
+
+                <ChildContent>
                 <ApexPointSeries TItem="PricePlanSlot"
                                  Items="ChartData"
-                                 Name="Price"
+                                 Name="Price (p/kWh)"
                                  XValue="@(e => e.valid_from)"
                                  YAggregate="@(e => e.Average(e => e.value_inc_vat))"
                                  SeriesType="SeriesType.Bar"
@@ -28,9 +59,9 @@
                                  XValue="@(e => e.valid_from)"
                                  YValue="@(e => e.export_value_inc_vat)"
                                  SeriesType="SeriesType.Line"
-                                 Color="darkgreen"
+                                 Color="#8e44ad"
                                  Hidden="@(!ChartData.Any(x => x.export_value_inc_vat != null))"
-                                 Stroke="@(new SeriesStroke { Color = "darkgreen", Width = 3 })"/>
+                                 Stroke="@(new SeriesStroke { Color = "#8e44ad", Width = 3 })"/>
 
                 <ApexPointSeries TItem="PricePlanSlot"
                                  Items="ChartData"
@@ -41,6 +72,7 @@
                                  Color="darkorange"
                                  Hidden="@(!ChartData.Any(x => x.pv_est_kwh > 0))"
                                  Stroke="@(new SeriesStroke { Color = "darkorange", Width = 3 })"/>
+                    </ChildContent>
                 </ApexChart >
         </div>
     }
@@ -79,7 +111,8 @@
             new()
             {
                 Title = new AxisTitle { Text = "Price (p/kWh)" },
-                SeriesName = "Price",
+                SeriesName = new SeriesName(["Price (p/kWh)", "Export Price (p/kWh)"]),
+                Min = 0,
                 DecimalsInFloat = 2
             },
             new()
@@ -93,5 +126,12 @@
 
         options.Yaxis = yAxis;
         options.Xaxis = new XAxis { Labels = new XAxisLabels { DatetimeUTC = false } };
+        options.Legend = new Legend
+        {
+            Position = LegendPosition.Bottom,
+            HorizontalAlign = ApexCharts.Align.Center,
+            ClusterGroupedSeries = false,
+            ItemMargin = new LegendItemMargin { Horizontal = 8, Vertical = 0 }
+        };
     }
 }

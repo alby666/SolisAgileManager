@@ -6,4 +6,9 @@
         <LangVersion>latest</LangVersion>
         <InvariantGlobalization>true</InvariantGlobalization>
     </PropertyGroup>
+    <PropertyGroup Condition="'$(OS)' == 'Unix'">
+        <BaseIntermediateOutputPath>obj/Unix/</BaseIntermediateOutputPath>
+        <BaseOutputPath>bin/Unix/</BaseOutputPath>
+        <DefaultItemExcludes>$(DefaultItemExcludes);obj/**;bin/**</DefaultItemExcludes>
+    </PropertyGroup>
 </Project>
