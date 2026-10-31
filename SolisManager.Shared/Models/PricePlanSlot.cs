@@ -68,6 +68,13 @@ public record PricePlanSlot
                 overrideAmps = ManualOverride.OverrideAmps;
                 actionType = "Manual";
             }
+            else if (AutoOverride is { Type: AutoOverrideType.IOGSmartCharge } iogOverride)
+            {
+                action = iogOverride.Action;
+                reason = iogOverride.Explanation;
+                overrideAmps = iogOverride.OverrideAmps;
+                actionType = "Auto";
+            }
             else if (VPPOverride != null)
             {
                 // Assuming no manual overrides, then VPP takes precedence
@@ -88,14 +95,6 @@ public record PricePlanSlot
                 reason = AutoOverride.Explanation;
                 overrideAmps = AutoOverride.OverrideAmps;
                 actionType = "Auto";
-            }
-            else if (VPPOverride != null)
-            {
-                // Next priority is VPP.
-                action = VPPOverride.Action;
-                reason = VPPOverride.Explanation;
-                overrideAmps = VPPOverride.OverrideAmps;
-                actionType = "VPP";
             }
             else if (ScheduledOverride != null)
             {

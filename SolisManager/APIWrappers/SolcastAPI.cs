@@ -36,7 +36,7 @@ public class SolcastAPI(SolisManagerConfig config, IUserAgentProvider userAgentP
         await LoadCachedSolcastDataFromDisk();
         
         // If we haven't got any updates, or the max cached value is in the past, we need to do an update
-        if (solcastCache.sites.Any( x => x.UpdateIsStale))
+        if (!solcastCache.sites.Any() || solcastCache.sites.Any(x => x.UpdateIsStale))
         {
             logger.LogInformation("Solcast startup - no cache available so running one-off update...");
             await GetNewSolcastForecasts();

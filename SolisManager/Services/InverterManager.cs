@@ -78,14 +78,19 @@ public class InverterManager : IInverterManagerService, IInverterRefreshService
         if (solcast == null || !solcast.Any() || slots == null || ! slots.Any())
             return;
 
+        static DateTime AsUtc(DateTime dateTime) =>
+            dateTime.Kind == DateTimeKind.Unspecified
+                ? DateTime.SpecifyKind(dateTime, DateTimeKind.Utc)
+                : dateTime.ToUniversalTime();
+
         var lookup = solcast
-                                    .DistinctBy(x => x.PeriodStartUtc.ToLocalTime())
-                                    .ToDictionary(x => x.PeriodStartUtc.ToLocalTime());
+            .DistinctBy(x => AsUtc(x.PeriodStartUtc))
+            .ToDictionary(x => AsUtc(x.PeriodStartUtc));
 
         var matchedData = false;
         foreach (var slot in slots)
         {
-            if (lookup.TryGetValue(slot.valid_from, out var solcastEstimate))
+            if (lookup.TryGetValue(slot.valid_from.ToUniversalTime(), out var solcastEstimate))
             {
                 slot.pv_est_kwh = solcastEstimate.ForecastkWh;
                 matchedData = true;
@@ -830,38 +835,19 @@ public class InverterManager : IInverterManagerService, IInverterRefreshService
         }
 
         var now = DateTime.Now;
-        var night = slots
-            .Where(x => !x.Daytime && x.valid_from >= now)
-            .GroupBy(x => x.valid_from.TimeOfDay >= TimeSpan.FromHours(12)
-                ? x.valid_from.Date
-                : x.valid_from.Date.AddDays(-1))
-            .OrderBy(x => x.Min(slot => slot.valid_from))
-            .FirstOrDefault();
-
-        if (night == null)
-            return;
-
-        var nightSlots = night.OrderBy(x => x.valid_from).ToArray();
-        if (nightSlots.Length < 3 || nightSlots.Any(x => x.PlanAction == SlotAction.Discharge))
-            return;
-
-        var chargeableSlots = nightSlots
-            .Where(x => !HasSlotOverride(x) && x.PlanAction != SlotAction.Discharge)
+        var cheapPriceTypes = new[] { PriceType.Cheapest, PriceType.BelowThreshold };
+        var cheapWindows = slots
+            .Where(x => x.valid_from >= now)
+            .OrderBy(x => x.valid_from)
+            .GetAdjacentGroups(x => cheapPriceTypes.Contains(x.PriceType))
+            .Select(x => x.ToArray())
             .ToArray();
         var requiredPrechargeSlots = config.SlotsForFullBatteryCharge;
-        if (chargeableSlots.Length < requiredPrechargeSlots)
-            return;
-
         var efficiency = config.ExportBatteryEfficiencyPercent / 100.0M;
-        var baselineChargeCost = chargeableSlots
-            .OrderBy(x => x.value_inc_vat)
-            .Take(requiredPrechargeSlots)
-            .Sum(x => x.value_inc_vat);
 
         PricePlanSlot[]? bestPrechargeSlots = null;
         PricePlanSlot[]? bestDischargeSlots = null;
         PricePlanSlot[]? bestFinalChargeSlots = null;
-        decimal bestProfit = 0;
         var minimumDischargeSoc = (config.InverterConfig as InverterConfigSolis)?.MinDischargeSOC ?? 15;
         var chargeAmps = (config.InverterConfig as InverterConfigSolis)?.MaxChargeRateAmps ?? 1;
         var dischargeAmps = (config.InverterConfig as InverterConfigSolis)?.MaxDischargeRateAmps ?? chargeAmps;
@@ -875,12 +861,27 @@ public class InverterManager : IInverterManagerService, IInverterRefreshService
         var maxDischargeSlots = (int)Math.Floor(
             requiredPrechargeSlots * (100 - minimumDischargeSoc) / 100.0M / dischargeEnergyPerSlot);
 
-        // The cheap import period can end before sunrise. Restrict the cycle to a
-        // contiguous run of cheap import slots so the final recharge stays cheap.
-        foreach (var cheapWindow in nightSlots
-                     .GetAdjacentGroups(x => x.PriceType is PriceType.Cheapest or PriceType.BelowThreshold)
-                     .Select(x => x.ToArray()))
+        foreach (var cheapWindow in cheapWindows)
         {
+            if (cheapWindow.Any(x => x.PlanAction == SlotAction.Discharge))
+                continue;
+
+            var chargeableSlots = cheapWindow
+                .Where(x => !HasSlotOverride(x) && x.PlanAction != SlotAction.Discharge)
+                .ToArray();
+            if (chargeableSlots.Length < requiredPrechargeSlots)
+                continue;
+
+            var baselineChargeCost = chargeableSlots
+                .OrderBy(x => x.value_inc_vat)
+                .Take(requiredPrechargeSlots)
+                .Sum(x => x.value_inc_vat);
+
+            var windowBestProfit = 0M;
+            PricePlanSlot[]? windowBestPrechargeSlots = null;
+            PricePlanSlot[]? windowBestDischargeSlots = null;
+            PricePlanSlot[]? windowBestFinalChargeSlots = null;
+
             for (var dischargeSlotCount = 1; dischargeSlotCount <= maxDischargeSlots; dischargeSlotCount++)
             {
                 var requiredRestoreSlots = (int)Math.Ceiling(dischargeSlotCount * dischargeEnergyPerSlot);
@@ -910,14 +911,22 @@ public class InverterManager : IInverterManagerService, IInverterRefreshService
                                         efficiency * dischargeEnergyPerSlot;
                     var profit = exportRevenue - incrementalChargeCost;
 
-                    if (profit > bestProfit)
+                    if (profit > windowBestProfit)
                     {
-                        bestProfit = profit;
-                        bestPrechargeSlots = prechargeSlots;
-                        bestDischargeSlots = dischargeSlots;
-                        bestFinalChargeSlots = finalChargeSlots;
+                        windowBestProfit = profit;
+                        windowBestPrechargeSlots = prechargeSlots;
+                        windowBestDischargeSlots = dischargeSlots;
+                        windowBestFinalChargeSlots = finalChargeSlots;
                     }
                 }
+            }
+
+            if (windowBestProfit > 0)
+            {
+                bestPrechargeSlots = windowBestPrechargeSlots;
+                bestDischargeSlots = windowBestDischargeSlots;
+                bestFinalChargeSlots = windowBestFinalChargeSlots;
+                break;
             }
         }
 
@@ -927,7 +936,7 @@ public class InverterManager : IInverterManagerService, IInverterRefreshService
         foreach (var slot in bestPrechargeSlots)
         {
             slot.PlanAction = SlotAction.Charge;
-            slot.ActionReason = "Charging before profitable export; the battery will be restored by the end of the cheap overnight period";
+            slot.ActionReason = "Charging before profitable export; the battery will be restored by the end of the cheap import window";
         }
 
         foreach (var slot in bestDischargeSlots)
@@ -939,10 +948,10 @@ public class InverterManager : IInverterManagerService, IInverterRefreshService
         foreach (var slot in bestFinalChargeSlots)
         {
             slot.PlanAction = SlotAction.Charge;
-            slot.ActionReason = "Final overnight charge to start the day with a full battery";
+            slot.ActionReason = "Final charge within the cheap import window to start the day with a full battery";
         }
 
-        logger.LogInformation("Scheduling overnight export tariff arbitrage from {Start:g} to {End:g}",
+        logger.LogInformation("Scheduling export tariff arbitrage in the cheap import window from {Start:g} to {End:g}",
             bestPrechargeSlots[0].valid_from, bestFinalChargeSlots[^1].valid_to);
     }
 
@@ -1448,7 +1457,7 @@ public class InverterManager : IInverterManagerService, IInverterRefreshService
                         {
                             if (slot.valid_from < dispatch.end && slot.valid_to > dispatch.start)
                             {
-                                if (slot.value_inc_vat == lowestRate)
+                                if (slot.value_inc_vat == lowestRate && slot.PlanAction != SlotAction.Discharge)
                                 {
                                     logger.LogInformation("Ignored IOG dispatch during cheapest price slot ({T}, {P}p)", slot.valid_from, slot.value_inc_vat);
                                     continue;
